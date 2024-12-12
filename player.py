@@ -85,11 +85,17 @@ totalFrames = 0 # how many frames have been displayed
 
 running = True
 pygame.mixer.music.play()
+screen.fill(0)
 while running:
-	screen.fill(0)
 	xPos = 0
 	yPos = 0
-	color = reader.read(1)
+	inverting = False
+
+	encType = reader.read(1)
+	if encType == 0:
+		screen.fill(0)
+		color = reader.read(1)
+
 	direction = reader.read(1)
 	compressedFrameData = []
 
@@ -103,23 +109,51 @@ while running:
 	if direction == 1:
 		for chunk in compressedFrameData:
 			while chunk != 0:
-				screen.set_at( (xPos,yPos), ((0,0,0) if color == 0 else (255,255,255)) )
+				if encType == 0: # We are in redraw mode, just set the pixels
+					screen.set_at( (xPos,yPos), ((0,0,0) if color == 0 else (255,255,255)) )
+				elif inverting: # Activly inverting, get current color and invert
+					currentColor = screen.get_at( (xPos,yPos) )
+					currentColor = 1 if currentColor == (255,255,255,255) else 0
+
+					screen.set_at( (xPos,yPos), ((0,0,0) if currentColor == 1 else (255,255,255)) )
+				else:
+					pass # Do nothing if we are in invert mode but not activly inverting
+
 				xPos += 1
 				if xPos >= FRAME_WIDTH:
 					xPos = 0
 					yPos += 1
 				chunk -= 1
-			color = 0 if color == 1 else 1
+
+			if encType == 0:
+				color = 0 if color == 1 else 1 # Only using color flag in redraw mode
+			else:
+				inverting = not inverting # Only using invert bool in invert mode
+
+
 	else:
 		for chunk in compressedFrameData:
 			while chunk != 0:
-				screen.set_at( (xPos,yPos), ((0,0,0) if color == 0 else (255,255,255)) )
+				if encType == 0: # We are in redraw mode, just set the pixels
+					screen.set_at( (xPos,yPos), ((0,0,0) if color == 0 else (255,255,255)) )
+				elif inverting: # Activly inverting, get current color and invert
+					currentColor = screen.get_at( (xPos,yPos) )
+					currentColor = 1 if currentColor == (255,255,255,255) else 0
+
+					screen.set_at( (xPos,yPos), ((0,0,0) if currentColor == 1 else (255,255,255)) )
+				else:
+					pass # Do nothing if we are in invert mode but not activly inverting
+
 				yPos += 1
 				if yPos >= FRAME_HEIGHT:
 					yPos = 0
 					xPos += 1
 				chunk -= 1
-			color = 0 if color == 1 else 1
+			if encType == 0:
+				color = 0 if color == 1 else 1
+			else:
+				inverting = not inverting
+
 	pygame.display.flip()
 	clock.tick(FRAMERATE)
 

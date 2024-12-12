@@ -107,15 +107,24 @@ frames = os.listdir("./imgs")
 
 globalEncoding = []
 
+prevPix = None
 
 for i, img in enumerate(frames):
 	print(f"Frame {i}")
 	pix = Image.open( os.path.join("./imgs", img) ).convert('YCbCr') #Load image into YUV (supposedly closer to human perception)
 	im = pix.load()
+
+	if prevPix != None:
+		prevIm = prevPix.load()
+	else:
+		prevIm = None
+
 	encodedHoriz = []
+	invertedHoriz = []
 	encodedVert = []
-	# (Color, length)
-	# 0=black, 1=white
+	invertedVert = []
+	# (Redraw, Color, length)
+	# [1=redraw, 0=invert], [0=black, 1=white, only if we are redrawing]
 
 	# Go through each pixel and map to black or white
 	count = 0 #How long the current run is
@@ -154,9 +163,65 @@ for i, img in enumerate(frames):
 	if count != 0:
 		encodedVert.append( (count, currentColor) )
 
+
+	if prevIm != None:
+		# Run inversions
+		count = 0 # How long current run is
+		inverting = False
+		for y in range(pix.size[1]):
+			for x in range(pix.size[0]):
+				color = closestColor(im[x, y])
+				prevColor = closestColor(prevIm[x, y])
+
+				# increment count if not inverting and colors match, or inverting and colors dont match
+				if (not inverting and color == prevColor) or (inverting and color != prevColor):
+					count += 1
+
+				# Need to change status of inverting and append previous run
+				elif (not inverting and color != prevColor) or (inverting and color == prevColor):
+					invertedHoriz.append( (count, None) ) # Need to append either way, dont have a invert/not invert flag, so a 0 is immediate invert
+					inverting = not inverting
+					currentColor = color
+					count = 1
+		if count != 0:
+			invertedHoriz.append( (count, None) )
+
+		count = 0 # How long current run is
+		inverting = False
+		for x in range(pix.size[0]):
+			for y in range(pix.size[1]):
+				color = closestColor(im[x, y])
+				prevColor = closestColor(prevIm[x, y])
+
+				# increment count if not inverting and colors match, or inverting and colors dont match
+				if (not inverting and color == prevColor) or (inverting and color != prevColor):
+					count += 1
+
+				# Need to change status of inverting and append previous run
+				elif (not inverting and color != prevColor) or (inverting and color == prevColor):
+					invertedVert.append( (count, None) )
+					inverting = not inverting
+					currentColor = color
+					count = 1
+		if count != 0:
+			invertedVert.append( (count, None) )
+
+	else:
+		invertedHoriz.append(None)
+		invertedVert.append(None)
+
+
+
 	# Determine the more efficient encoding
 	vertSize = 0
 	horizSize = 0
+	invVertSize = 0
+	invHorizSize = 0
+
+	choice = 0 # 0=vertDraw, 1=horizDraw, 2=vertInv, 3=horizInv
+	choiceSize = 0
+	choiceEncoding = None
+
 	for c in encodedVert:
 		_, length = encodeInt(c[0])
 		vertSize += length
@@ -164,11 +229,43 @@ for i, img in enumerate(frames):
 	for c in encodedHoriz:
 		_, length = encodeInt(c[0])
 		horizSize += length
+
 	if vertSize < horizSize:
-		globalEncoding.append( (0, encodedVert) )
+		choice = 0
+		choiceSize = vertSize
+		choiceEncoding = encodedVert
 	else:
-		globalEncoding.append( (1, encodedHoriz) )
-	pix.close()
+		choice = 1
+		choiceSize = horizSize
+		choiceEncoding = encodedHoriz
+
+	# Check inversions (if applicable)
+	if prevPix != None:
+		for c in invertedVert:
+			_, length = encodeInt( c[0] )
+			invVertSize += length
+		if invVertSize < choiceSize:
+			choice = 2
+			choiceSize = invVertSize
+			choiceEncoding = invertedVert
+
+		for c in invertedHoriz:
+			_, length = encodeInt( c[0] )
+			invHorizSize += length
+		if invHorizSize < choiceSize:
+			choice = 3
+			choiceSize = invHorizSize
+			choiceEncoding = invertedHoriz
+
+	# add frame to globalEncoding
+	globalEncoding.append( (choice, choiceEncoding) )
+
+
+	# Close previous image (if applicable)
+	if prevPix != None:
+		prevPix.close()
+
+	prevPix = pix
 
 
 '''
@@ -211,10 +308,19 @@ for e in globalEncoding:
 		saveBits = 0x00
 		saveBitsLen = 0
 
-		if i == 0: #First chunk, add color and direction flags
-			scratch = scratch << 2
-			scratch |= (chunk[1] << 1) | e[0]
-			scratchLen += 2
+		if i == 0: #First chunk add flags
+			if e[0] == 0 or e[0] == 1: #Redraw frame, add color and direction flags
+				scratch = scratch << 3
+				# Redraw, color, direction flags
+				scratch |= (0 << 2) | (chunk[1] << 1) | e[0]
+				scratchLen += 3
+			elif e[0] == 2 or e[0] == 3: #Inverting frame
+				scratch = scratch << 2
+				scratch |= e[0] # We can directly OR in e[0] becase it is 2 or 3, which in binary is our flags
+				scratchLen += 2
+			else:
+				print("Error")
+				exit()
 
 		# encode length to bits
 		countBits, countLen = encodeInt(chunk[0])
@@ -245,9 +351,51 @@ index = 0
 reader = BitReader("encodedImages.bin")
 while index < FRAME_COUNT:
 	decoding = []
+	encType = 0
+	color = None
+	direction = 0
+
+	frameCount = 0
+
+	while frameCount != FRAME_PIX:
+		if frameCount == 0: # First pixel of the frame, determine encoding type
+			encType = reader.read(1)
+			if encType == 0:
+				color = reader.read(1)
+				direction = reader.read(1)
+			else:
+				direction = reader.read(1)
+
+		count = decodeInt(reader)
+		frameCount += count
+		decoding.append( (count, color) )
+
+		if frameCount > FRAME_PIX: # Check for errors
+			print(f"{globalEncoding[index]}\n{decoding}" )
+			print(f"{index} {frameCount}")
+			print("ERROR")
+			exit()
+		if color != None:
+			color = 1 if color==0 else 0
+
+	encFlags = (encType << 1) | (direction)
+
+	for enc, dec in zip(globalEncoding[index][1], decoding):
+		if (enc[0] != dec[0]) or (enc[1] != dec[1]) or (globalEncoding[index][0] != encFlags):
+			print(f"Mismatch! {enc} {dec}")
+			exit()
+	print(f"Check {index} passed ({encFlags})")
+	index += 1
+
+
+'''
+reader = BitReader("encodedImages.bin")
+while index < FRAME_COUNT:
+	decoding = []
 	color = 0
 	direction = 0
 	frameCount = 0
+
 	while frameCount != FRAME_PIX:
 		if frameCount == 0: #First pixel of the frame, need to get color flag
 			color = reader.read(1)
@@ -262,9 +410,12 @@ while index < FRAME_COUNT:
 			print("ERROR")
 			exit()
 		color = 1 if color==0 else 0 # Update color
+
+
 	for enc, dec in zip(globalEncoding[index][1], decoding):
 		if (enc[0] != dec[0]) or (enc[1] != dec[1]) or (globalEncoding[index][0] != direction):
 			print(f"Mismatch! {enc} {dec}")
 			exit()
 	print(f"Check {index} passed")
 	index += 1
+'''
